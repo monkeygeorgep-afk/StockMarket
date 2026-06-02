@@ -10,8 +10,10 @@ import io
 # --- 1. 系統配置與常數 ---
 # 提醒：請將 line_token 換成你申請的 Token
 ST_CONFIG = {
+    # 修改 app.py 裡的設定讀取方式
+ST_CONFIG = {
     "page_title": "台股 AI 智慧分析系統",
-    "line_token": "YOUR_LINE_NOTIFY_TOKEN_HERE", 
+    "line_token": st.secrets["LINE_TOKEN"], # 改用 secrets 讀取
 }
 
 # --- 2. 原生技術指標計算 (不依賴 pandas-ta) ---
