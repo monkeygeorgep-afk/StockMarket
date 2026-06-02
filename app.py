@@ -9,7 +9,6 @@ import io
 
 # --- 1. 系統配置與常數 ---
 # 提醒：請將 line_token 換成你申請的 Token
-ST_CONFIG = {
     # 修改 app.py 裡的設定讀取方式
 ST_CONFIG = {
     "page_title": "台股 AI 智慧分析系統",
