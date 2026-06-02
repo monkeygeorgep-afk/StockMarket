@@ -1,0 +1,21 @@
+name: 每日盤後自動掃描
+on:
+  schedule:
+    - cron: '30 6 * * 1-5' # 台北時間週一至週五 14:30 執行
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: 設定 Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.11'
+      - name: 安裝套件
+        run: pip install -r requirements.txt
+      - name: 執行掃描
+        env:
+          LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
+        run: python app.py --mode monitor # 需要在 app.py 加入簡易的命令列執行邏輯
