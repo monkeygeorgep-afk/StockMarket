@@ -4,200 +4,177 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from FinMind.data import DataLoader
-import requests
 import google.generativeai as genai
-from datetime import datetime
+from datetime import datetime, timedelta
+import requests
 
-# --- 1. 系統配置與 AI 初始化 ---
-ST_CONFIG = {"page_title": "台股 AI 終極戰情室 6.6"}
-if "GEMINI_API_KEY" in st.secrets:
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+# ==========================================
+# 模組一：數據中心 (Data Center)
+# ==========================================
+class StockDataCenter:
+    def __init__(self):
+        token = st.secrets.get("FINMIND_TOKEN", "")
+        self.dl = DataLoader(token=token) if token else DataLoader()
+        self.stock_info = self.dl.taiwan_stock_info()
 
-# --- 2. 核心運算模組 ---
-def calculate_indicators(df):
-    for m in [5, 10, 20, 60]:
-        df[f'{m}MA'] = df['Close'].rolling(window=m).mean()
-    std = df['Close'].rolling(window=20).std()
-    df['BBU'], df['BBL'] = df['20MA'] + (std * 2), df['20MA'] - (std * 2)
-    l9, h9 = df['Low'].rolling(window=9).min(), df['High'].rolling(window=9).max()
-    rsv = 100 * (df['Close'] - l9) / (h9 - l9)
-    k, d = [50.0], [50.0]
-    for i in range(1, len(rsv)):
-        v = rsv.iloc[i] if not np.isnan(rsv.iloc[i]) else 50.0
-        nk = (k[-1] * 2/3) + (v * 1/3)
-        nd = (d[-1] * 2/3) + (nk * 1/3)
-        k.append(nk); d.append(nd)
-    df['K'], df['D'] = k, d
-    sup, res = df['Low'].tail(60).min(), df['High'].tail(60).max()
-    return df, sup, res
-
-def calculate_ai_score(df, chip):
-    if df.empty: return 50, []
-    curr = df.iloc[-1]
-    score = 50 
-    details = []
-    if curr['Close'] > curr['20MA']: 
-        score += 10; details.append("股價站上月線 (多)")
-    if curr['K'] > curr['D']: 
-        score += 10; details.append("KD金叉 (多)")
-    if curr['Close'] > curr['BBU']: 
-        score += 10; details.append("布林強勢突破 (多)")
-    if not chip.empty:
-        last_chip = chip[chip['date'] == chip['date'].max()]
-        fi = last_chip[last_chip['name']=='Foreign_Investor'].apply(lambda x: x['buy']-x['sell'], axis=1).sum()
-        it = last_chip[last_chip['name']=='Investment_Trust'].apply(lambda x: x['buy']-x['sell'], axis=1).sum()
-        if fi > 0 and it > 0: 
-            score += 20; details.append("外資投信同步買超 (強多)")
-        elif it > 0: 
-            score += 10; details.append("投信單獨鎖碼 (多)")
-    return min(score, 100), details
-
-def estimate_volume(current_volume):
-    now = datetime.now()
-    start_time = now.replace(hour=9, minute=0, second=0, microsecond=0)
-    end_time = now.replace(hour=13, minute=30, second=0, microsecond=0)
-    if now < start_time: return current_volume, 0
-    if now > end_time: return current_volume, 100
-    elapsed_minutes = (now - start_time).seconds / 60
-    total_minutes = 270
-    ratio = max(elapsed_minutes / total_minutes, 0.01)
-    if elapsed_minutes <= 60: ratio *= 1.5 
-    estimated_vol = current_volume / min(ratio, 0.99)
-    progress = min((elapsed_minutes / total_minutes) * 100, 100)
-    return int(estimated_vol), int(progress)
-
-# --- 3. 數據綜合獲取 (修正修正 API 名稱與合併邏輯) ---
-@st.cache_data(ttl=3600)
-def fetch_master_data(stock_id):
-    # 修正 DataLoader 初始化方式
-    token = st.secrets.get("FINMIND_TOKEN", None)
-    dl = DataLoader(token=token) if token else DataLoader()
-        
-    start_date = (pd.Timestamp.now() - pd.Timedelta(days=730)).strftime('%Y-%m-%d')
-    df = dl.taiwan_stock_daily(stock_id=stock_id, start_date=start_date)
-    if df.empty: return [None]*8
-    
-    df = df.rename(columns={'max':'High','min':'Low','close':'Close','open':'Open','Trading_Volume':'Volume'})
-    df['date'] = pd.to_datetime(df['date'])
-    df, sup, res = calculate_indicators(df)
-    
-    info = dl.taiwan_stock_info()
-    name = info[info['stock_id'] == stock_id]['stock_name'].values[0] if stock_id in info['stock_id'].values else "未知"
-    
-    chip = dl.taiwan_stock_institutional_investors(stock_id=stock_id, start_date=(pd.Timestamp.now() - pd.Timedelta(days=15)).strftime('%Y-%m-%d'))
-    if not chip.empty: chip[['buy', 'sell']] = chip[['buy', 'sell']] / 1000
-
-    fin = dl.taiwan_stock_financial_statement(stock_id=stock_id, start_date=(pd.Timestamp.now() - pd.Timedelta(days=730)).strftime('%Y-%m-%d'))
-    news = dl.taiwan_stock_news(stock_id=stock_id, start_date=(pd.Timestamp.now() - pd.Timedelta(days=7)).strftime('%Y-%m-%d'))
-    
-    # 修正持股 API 名稱與異常處理
-    share_hold = pd.DataFrame()
-    try:
-        share_hold = dl.taiwan_stock_holding_shares_per(stock_id=stock_id, start_date=(pd.Timestamp.now() - pd.Timedelta(days=180)).strftime('%Y-%m-%d'))
-    except: pass
-    
-    # 修正本益比河流圖合併邏輯
-    df['ttm_eps'] = np.nan
-    eps_df = fin[fin['type'] == 'EPS'].copy()
-    if not eps_df.empty:
+    @st.cache_data(ttl=3600)
+    def get_full_analysis_data(_self, stock_id):
         try:
-            eps_df['date'] = pd.to_datetime(eps_df['date'])
-            eps_df = eps_df.sort_values('date')
-            eps_df['ttm_eps'] = eps_df['value'].rolling(window=4).sum()
-            df = df.sort_values('date')
-            df = pd.merge_asof(df, eps_df[['date', 'ttm_eps']], on='date', direction='backward')
+            start_date = (datetime.now() - timedelta(days=730)).strftime('%Y-%m-%d')
+            df = _self.dl.taiwan_stock_daily(stock_id=stock_id, start_date=start_date)
+            if df.empty: return None
+            df = df.rename(columns={'max':'High','min':'Low','close':'Close','open':'Open','Trading_Volume':'Volume'})
+            df['date'] = pd.to_datetime(df['date'])
+            
+            # 指標與基本資訊
+            df = _self._add_indicators(df)
+            info = _self.stock_info[_self.stock_info['stock_id'] == stock_id]
+            name = info['stock_name'].values[0] if not info.empty else "未知"
+            industry = info['industry_category'].values[0] if not info.empty else "未知"
+            
+            # 籌碼與財報 (Fail-safe)
+            chip = _self.dl.taiwan_stock_institutional_investors(stock_id=stock_id, start_date=(datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'))
+            fin = _self.dl.taiwan_stock_financial_statement(stock_id=stock_id, start_date=start_date)
+            
+            # 處理 TTM EPS (河流圖用)
+            df['ttm_eps'] = np.nan
+            eps_df = fin[fin['type'] == 'EPS'].copy()
+            if not eps_df.empty:
+                eps_df['date'] = pd.to_datetime(eps_df['date'])
+                eps_df = eps_df.sort_values('date')
+                eps_df['ttm_eps'] = eps_df['value'].rolling(window=4).sum()
+                df = pd.merge_asof(df.sort_values('date'), eps_df[['date', 'ttm_eps']], on='date', direction='backward')
+            
+            return {"df": df, "name": name, "industry": industry, "chip": chip, "stock_id": stock_id}
+        except: return None
+
+    def _add_indicators(self, df):
+        df['20MA'] = df['Close'].rolling(window=20).mean()
+        df['VMA5'] = df['Volume'].rolling(window=5).mean()
+        std = df['Close'].rolling(window=20).std()
+        df['BBU'], df['BBL'] = df['20MA'] + (std * 2), df['20MA'] - (std * 2)
+        l9, h9 = df['Low'].rolling(window=9).min(), df['High'].rolling(window=9).max()
+        rsv = 100 * (df['Close'] - l9) / (h9 - l9 + 1e-9)
+        k, d = [50.0], [50.0]
+        for i in range(1, len(rsv)):
+            nk = (k[-1] * 2/3) + (rsv.iloc[i] * 1/3)
+            nd = (d[-1] * 2/3) + (nk * 1/3)
+            k.append(nk); d.append(nd)
+        df['K'], df['D'] = k, d
+        return df
+
+# ==========================================
+# 模組二：量化引擎 (Quant Engine)
+# ==========================================
+class QuantEngine:
+    @staticmethod
+    def calculate_ai_score(data):
+        df, chip = data['df'], data['chip']
+        curr = df.iloc[-1]
+        score = 50
+        if curr['Close'] > curr['20MA']: score += 15
+        if curr['K'] > curr['D']: score += 10
+        if not chip.empty:
+            last = chip[chip['date'] == chip['date'].max()]
+            if last[last['name']=='Foreign_Investor'].apply(lambda x: x['buy']-x['sell'], axis=1).sum() > 0: score += 15
+        return min(score, 100)
+
+    @staticmethod
+    def run_backtest(df):
+        res = []
+        for i in range(60, len(df) - 5):
+            if df.iloc[i]['K'] > df.iloc[i]['D'] and df.iloc[i]['Close'] > df.iloc[i]['20MA']:
+                res.append((df.iloc[i+5]['Close'] - df.iloc[i+1]['Open']) / df.iloc[i+1]['Open'])
+        return (len(res), np.mean(res)*100 if res else 0, len([r for r in res if r>0])/len(res)*100 if res else 0)
+
+# ==========================================
+# 模組三：通知中心 (Notification)
+# ==========================================
+class Notifier:
+    @staticmethod
+    def send_flex_card(data, ai_score, signals):
+        try:
+            url = "https://api.line.me/v2/bot/message/push"
+            headers = {"Authorization": f"Bearer {st.secrets['LINE_CHANNEL_ACCESS_TOKEN']}", "Content-Type": "application/json"}
+            payload = {
+                "to": st.secrets["LINE_USER_ID"],
+                "messages": [{
+                    "type": "flex", "altText": f"戰情警報:{data['name']}",
+                    "contents": {
+                        "type": "bubble", "header": {"type": "box", "layout": "vertical", "contents": [{"type": "text", "text": "🛡️ AI 終極戰情巡邏", "color": "#FFFFFF", "weight": "bold"}]},
+                        "styles": {"header": {"backgroundColor": "#1F2421"}},
+                        "body": {"type": "box", "layout": "vertical", "contents": [
+                            {"type": "text", "text": f"{data['name']} ({data['stock_id']})", "weight": "bold", "size": "xl"},
+                            {"type": "text", "text": f"AI 評分: {ai_score} 分", "margin": "md", "color": "#FF4D4D" if ai_score > 70 else "#7F8C8D"},
+                            {"type": "text", "text": f"觸發訊號: {' / '.join(signals)}", "size": "sm", "wrap": True, "margin": "md"}
+                        ]}
+                    }
+                }]
+            }
+            requests.post(url, headers=headers, json=payload)
         except: pass
-    
-    return df, chip, news, fin, name, sup, res, share_hold
 
-# --- 4. Line Flex Card 發送 ---
-def send_line_flex_card(sid, name, price, change, ai_score, signals):
-    try:
-        url = "https://api.line.me/v2/bot/message/push"
-        headers = {"Authorization": f"Bearer {st.secrets['LINE_CHANNEL_ACCESS_TOKEN']}", "Content-Type": "application/json"}
-        color_trend = "#FF4D4D" if change >= 0 else "#2ECC71"
-        arrow = "▲" if change >= 0 else "▼"
-        ai_color = "#FF4D4D" if ai_score >= 70 else "#2ECC71" if ai_score <= 45 else "#7F8C8D"
-        
-        flex_contents = {
-          "type": "bubble",
-          "header": {"type": "box", "layout": "vertical", "contents": [{"type": "text", "text": "🛡️ AI 戰情室巡邏", "color": "#FFFFFF", "weight": "bold"}]},
-          "styles": {"header": {"backgroundColor": "#1F2421"}},
-          "body": {"type": "box", "layout": "vertical", "contents": [
-              {"type": "text", "text": f"{name} {sid}", "weight": "bold", "size": "xl"},
-              {"type": "separator", "margin": "md"},
-              {"type": "box", "layout": "horizontal", "margin": "md", "contents": [
-                  {"type": "text", "text": f"股價: {price}", "weight": "bold", "size": "md"},
-                  {"type": "text", "text": f"{arrow}{abs(change):.1f}", "color": color_trend, "align": "end", "weight": "bold"}
-              ]},
-              {"type": "text", "text": " / ".join(signals), "size": "sm", "color": "#555555", "margin": "md", "wrap": True}
-          ]},
-          "footer": {"type": "box", "layout": "vertical", "contents": [{"type": "button", "style": "primary", "color": ai_color, "action": {"type": "uri", "label": f"AI 評分: {ai_score}", "uri": "https://line.me"}}]}
-        }
-        payload = {"to": st.secrets["LINE_USER_ID"], "messages": [{"type": "flex", "altText": f"戰報: {name}", "contents": flex_contents}]}
-        requests.post(url, headers=headers, json=payload)
-    except: pass
-
-# --- 5. UI 主程式 ---
+# ==========================================
+# 模組四：主程式 UI
+# ==========================================
 def main():
-    st.set_page_config(layout="wide", page_title=ST_CONFIG["page_title"])
-    if 'watchlist' not in st.session_state: st.session_state.watchlist = ['2330', '2317', '2454']
+    st.set_page_config(layout="wide", page_title="台股 AI 終極戰情室 8.0")
+    if "GEMINI_API_KEY" in st.secrets: genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    dc = StockDataCenter()
 
     with st.sidebar:
-        st.title("🛡️ AI 終極戰情室 6.6")
-        target_id = st.text_input("輸入股票代號", value="2330")
+        st.title("🛡️ 終極戰情室 8.0")
+        stock_input = st.text_input("多股監控 (代號逗號隔開)", value="2330, 2317, 2454")
+        stock_list = [s.strip() for s in stock_input.split(",")]
         st.divider()
-        mode = st.radio("主分析視角", ["1. 技術與 AI 報告", "2. 本益比河流圖", "3. 大戶籌碼趨勢"])
-        if st.button("🔴 啟動 Full Scan (手機接收)"):
+        if st.button("🔴 啟動全方位巡邏 (Line)"):
             with st.spinner("巡邏中..."):
-                for sid in st.session_state.watchlist:
-                    d, c, _, _, n, s, r, _ = fetch_master_data(sid)
-                    if d is None: continue
-                    p, score = d['Close'].iloc[-1], calculate_ai_score(d, c)[0]
-                    sigs = []
-                    if p <= s * 1.02: sigs.append("⚓支撐")
-                    if p >= r * 0.98: sigs.append("🚩壓力")
-                    if d['K'].iloc[-1] > d['D'].iloc[-1] and d['K'].iloc[-2] < d['D'].iloc[-2]: sigs.append("⚡KD金叉")
-                    if sigs: send_line_flex_card(sid, n, p, p-d['Close'].iloc[-2], score, sigs)
-                st.success("已發送至 Line")
+                for sid in stock_list:
+                    data = dc.get_full_analysis_data(sid)
+                    if data:
+                        score = QuantEngine.calculate_ai_score(data)
+                        if score >= 70:
+                            Notifier.send_flex_card(data, score, ["AI 高分", "趨勢轉強"])
+                st.success("巡邏完畢，高分股已發送通知。")
 
-    df, chip, news, fin, name, sup, res, share_hold = fetch_master_data(target_id)
-    if df is not None:
-        ai_score, ai_details = calculate_ai_score(df, chip)
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("今日收盤", f"{df['Close'].iloc[-1]}", f"{df['Close'].iloc[-1]-df['Close'].iloc[-2]:.1f}")
-        c2.metric("AI 綜合評分", f"{ai_score} 分")
-        c3.error(f"🚩 壓力位：{res:.2f}")
-        c4.success(f"⚓ 支撐位：{sup:.2f}")
+    tab1, tab2 = st.tabs(["🎯 多股對比熱力圖", "📊 單股深度診斷"])
 
-        if "1." in mode:
-            with st.expander("🤖 AI 策略報告", expanded=True):
-                if st.button("🔍 執行 AI 分析"):
+    with tab1:
+        comparison = []
+        for sid in stock_list:
+            data = dc.get_full_analysis_data(sid)
+            if data:
+                score = QuantEngine.calculate_ai_score(data)
+                count, ret, win = QuantEngine.run_backtest(data['df'])
+                comparison.append({"代號": sid, "名稱": data['name'], "AI評分": score, "回測勝率": f"{win:.1f}%", "預期報酬": f"{ret:.2f}%"})
+        
+        if comparison:
+            comp_df = pd.DataFrame(comparison)
+            st.dataframe(comp_df.style.background_gradient(subset=['AI評分'], cmap='RdYlGn'), use_container_width=True)
+            fig_heat = go.Figure(data=go.Heatmap(z=[comp_df['AI評分']], x=comp_df['名稱'], colorscale='Viridis'))
+            st.plotly_chart(fig_heat, use_container_width=True)
+
+    with tab2:
+        target_sid = st.selectbox("選擇診斷代號", stock_list)
+        data = dc.get_full_analysis_data(target_sid)
+        if data:
+            df = data['df']
+            col_l, col_r = st.columns([3, 1])
+            with col_l:
+                # 繪製 K線 + 布林 + 成交量
+                fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
+                fig.add_trace(go.Candlestick(x=df['date'], open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="K線"), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df['date'], y=df['BBU'], line=dict(color='rgba(255,255,255,0.2)'), name="布林上軌"), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df['date'], y=df['BBL'], line=dict(color='rgba(255,255,255,0.2)'), fill='tonexty', name="布林下軌"), row=1, col=1)
+                fig.add_trace(go.Bar(x=df['date'], y=df['Volume'], name="成交量", marker_color='gray'), row=2, col=1)
+                fig.update_layout(height=700, template="plotly_dark", xaxis_rangeslider_visible=False)
+                st.plotly_chart(fig, use_container_width=True)
+            with col_r:
+                score = QuantEngine.calculate_ai_score(data)
+                st.metric("AI 綜合評分", f"{score} 分")
+                if st.button("🔍 生成 AI 深度報告"):
                     model = genai.GenerativeModel('models/gemini-2.5-flash')
-                    prompt = f"{name}({target_id}) AI評分{ai_score}分，指標：{ai_details}。請給予短中線建議。"
+                    prompt = f"你是操盤手。{data['name']} AI 評分 {score}。請結合技術面給予建議。"
                     st.write(model.generate_content(prompt).text)
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-            fig.add_trace(go.Candlestick(x=df['date'], open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="K"), row=1, col=1)
-            for m, clr in zip(['5MA', '20MA', '60MA'], ['white', 'orange', 'cyan']):
-                fig.add_trace(go.Scatter(x=df['date'], y=df[m], name=m, line=dict(color=clr, width=1)), row=1, col=1)
-            fig.update_layout(height=700, template="plotly_dark", xaxis_rangeslider_visible=False)
-            st.plotly_chart(fig, use_container_width=True)
-        elif "2." in mode:
-            if 'ttm_eps' in df.columns and not df['ttm_eps'].isnull().all():
-                fig_river = go.Figure()
-                for m, color in zip([10, 15, 20, 25, 30], ['rgba(0,255,0,0.1)', 'rgba(0,255,0,0.2)', 'rgba(255,255,0,0.2)', 'rgba(255,100,0,0.2)', 'rgba(255,0,0,0.2)']):
-                    fig_river.add_trace(go.Scatter(x=df['date'], y=df['ttm_eps']*m, fill='tonexty' if m>10 else None, name=f"{m}x PE", line_width=0))
-                fig_river.add_trace(go.Scatter(x=df['date'], y=df['Close'], name="股價", line=dict(color='white')))
-                st.plotly_chart(fig_river, use_container_width=True)
-            else: st.warning("財報數據不全，無法繪製河流圖。")
-        elif "3." in mode:
-            if not share_hold.empty:
-                big = share_hold[share_hold['Holding_class'] == '1000張以上']
-                fig_c = make_subplots(specs=[[{"secondary_y": True}]])
-                fig_c.add_trace(go.Scatter(x=big['date'], y=big['percent'], name="1000張大戶(%)"), secondary_y=False)
-                fig_c.add_trace(go.Scatter(x=df['date'], y=df['Close'], name="股價", line=dict(dash='dot')), secondary_y=True)
-                st.plotly_chart(fig_c, use_container_width=True)
-            else: st.warning("無法載入籌碼數據。")
-    else: st.error("查無資料。")
 
 if __name__ == "__main__": main()
