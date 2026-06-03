@@ -9,11 +9,11 @@ import google.generativeai as genai
 from datetime import datetime
 
 # --- 1. 系統配置與 AI 初始化 ---
-ST_CONFIG = {"page_title": "台股 AI 終極戰情室 6.5"}
+ST_CONFIG = {"page_title": "台股 AI 終極戰情室 6.6"}
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
-# --- 2. 核心運算：技術指標、河流圖與 AI 量化評分 ---
+# --- 2. 核心運算模組 ---
 def calculate_indicators(df):
     for m in [5, 10, 20, 60]:
         df[f'{m}MA'] = df['Close'].rolling(window=m).mean()
@@ -32,6 +32,7 @@ def calculate_indicators(df):
     return df, sup, res
 
 def calculate_ai_score(df, chip):
+    if df.empty: return 50, []
     curr = df.iloc[-1]
     score = 50 
     details = []
@@ -59,16 +60,18 @@ def estimate_volume(current_volume):
     if now > end_time: return current_volume, 100
     elapsed_minutes = (now - start_time).seconds / 60
     total_minutes = 270
-    ratio = (elapsed_minutes / total_minutes)
+    ratio = max(elapsed_minutes / total_minutes, 0.01)
     if elapsed_minutes <= 60: ratio *= 1.5 
     estimated_vol = current_volume / min(ratio, 0.99)
-    progress = (elapsed_minutes / total_minutes) * 100
+    progress = min((elapsed_minutes / total_minutes) * 100, 100)
     return int(estimated_vol), int(progress)
 
-# --- 3. 數據綜合獲取 (含 Fail-Safe 機制) ---
+# --- 3. 數據綜合獲取 (修正修正 API 名稱與合併邏輯) ---
 @st.cache_data(ttl=3600)
 def fetch_master_data(stock_id):
-    dl = DataLoader()
+    # 修正 DataLoader 初始化方式
+    token = st.secrets.get("FINMIND_TOKEN", None)
+    dl = DataLoader(token=token) if token else DataLoader()
         
     start_date = (pd.Timestamp.now() - pd.Timedelta(days=730)).strftime('%Y-%m-%d')
     df = dl.taiwan_stock_daily(stock_id=stock_id, start_date=start_date)
@@ -87,20 +90,27 @@ def fetch_master_data(stock_id):
     fin = dl.taiwan_stock_financial_statement(stock_id=stock_id, start_date=(pd.Timestamp.now() - pd.Timedelta(days=730)).strftime('%Y-%m-%d'))
     news = dl.taiwan_stock_news(stock_id=stock_id, start_date=(pd.Timestamp.now() - pd.Timedelta(days=7)).strftime('%Y-%m-%d'))
     
-    # 修正 API 名稱並加入異常處理
+    # 修正持股 API 名稱與異常處理
     share_hold = pd.DataFrame()
     try:
         share_hold = dl.taiwan_stock_holding_shares_per(stock_id=stock_id, start_date=(pd.Timestamp.now() - pd.Timedelta(days=180)).strftime('%Y-%m-%d'))
-    except:
-        pass # 失敗則回傳空表，不中斷程式
+    except: pass
     
-    eps_df = fin[fin['type'] == 'EPS'].sort_values('date')
-    eps_df['ttm_eps'] = eps_df['value'].rolling(window=4).sum()
-    df = pd.merge_asof(df.sort_values('date'), eps_df[['date', 'ttm_eps']], on='date', direction='backward')
+    # 修正本益比河流圖合併邏輯
+    df['ttm_eps'] = np.nan
+    eps_df = fin[fin['type'] == 'EPS'].copy()
+    if not eps_df.empty:
+        try:
+            eps_df['date'] = pd.to_datetime(eps_df['date'])
+            eps_df = eps_df.sort_values('date')
+            eps_df['ttm_eps'] = eps_df['value'].rolling(window=4).sum()
+            df = df.sort_values('date')
+            df = pd.merge_asof(df, eps_df[['date', 'ttm_eps']], on='date', direction='backward')
+        except: pass
     
     return df, chip, news, fin, name, sup, res, share_hold
 
-# --- 4. Line Flex Card 發送邏輯 ---
+# --- 4. Line Flex Card 發送 ---
 def send_line_flex_card(sid, name, price, change, ai_score, signals):
     try:
         url = "https://api.line.me/v2/bot/message/push"
@@ -134,21 +144,21 @@ def main():
     if 'watchlist' not in st.session_state: st.session_state.watchlist = ['2330', '2317', '2454']
 
     with st.sidebar:
-        st.title("🛡️ AI 終極戰情室 6.5")
+        st.title("🛡️ AI 終極戰情室 6.6")
         target_id = st.text_input("輸入股票代號", value="2330")
         st.divider()
         mode = st.radio("主分析視角", ["1. 技術與 AI 報告", "2. 本益比河流圖", "3. 大戶籌碼趨勢"])
-        if st.button("🔴 啟動 Full Scan (手機)"):
+        if st.button("🔴 啟動 Full Scan (手機接收)"):
             with st.spinner("巡邏中..."):
                 for sid in st.session_state.watchlist:
-                    d, c, _, _, name, s, r, _ = fetch_master_data(sid)
+                    d, c, _, _, n, s, r, _ = fetch_master_data(sid)
                     if d is None: continue
-                    price, ai_score = d['Close'].iloc[-1], calculate_ai_score(d, c)[0]
-                    signals = []
-                    if price <= s * 1.02: signals.append("⚓支撐")
-                    if price >= r * 0.98: signals.append("🚩壓力")
-                    if d['K'].iloc[-1] > d['D'].iloc[-1] and d['K'].iloc[-2] < d['D'].iloc[-2]: signals.append("⚡KD金叉")
-                    if signals: send_line_flex_card(sid, name, price, price-d['Close'].iloc[-2], ai_score, signals)
+                    p, score = d['Close'].iloc[-1], calculate_ai_score(d, c)[0]
+                    sigs = []
+                    if p <= s * 1.02: sigs.append("⚓支撐")
+                    if p >= r * 0.98: sigs.append("🚩壓力")
+                    if d['K'].iloc[-1] > d['D'].iloc[-1] and d['K'].iloc[-2] < d['D'].iloc[-2]: sigs.append("⚡KD金叉")
+                    if sigs: send_line_flex_card(sid, n, p, p-d['Close'].iloc[-2], score, sigs)
                 st.success("已發送至 Line")
 
     df, chip, news, fin, name, sup, res, share_hold = fetch_master_data(target_id)
@@ -173,11 +183,13 @@ def main():
             fig.update_layout(height=700, template="plotly_dark", xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True)
         elif "2." in mode:
-            fig_river = go.Figure()
-            for m, color in zip([10, 15, 20, 25, 30], ['rgba(0,255,0,0.1)', 'rgba(0,255,0,0.2)', 'rgba(255,255,0,0.2)', 'rgba(255,100,0,0.2)', 'rgba(255,0,0,0.2)']):
-                fig_river.add_trace(go.Scatter(x=df['date'], y=df['ttm_eps']*m, fill='tonexty' if m>10 else None, name=f"{m}x PE", line_width=0))
-            fig_river.add_trace(go.Scatter(x=df['date'], y=df['Close'], name="股價", line=dict(color='white')))
-            st.plotly_chart(fig_river, use_container_width=True)
+            if 'ttm_eps' in df.columns and not df['ttm_eps'].isnull().all():
+                fig_river = go.Figure()
+                for m, color in zip([10, 15, 20, 25, 30], ['rgba(0,255,0,0.1)', 'rgba(0,255,0,0.2)', 'rgba(255,255,0,0.2)', 'rgba(255,100,0,0.2)', 'rgba(255,0,0,0.2)']):
+                    fig_river.add_trace(go.Scatter(x=df['date'], y=df['ttm_eps']*m, fill='tonexty' if m>10 else None, name=f"{m}x PE", line_width=0))
+                fig_river.add_trace(go.Scatter(x=df['date'], y=df['Close'], name="股價", line=dict(color='white')))
+                st.plotly_chart(fig_river, use_container_width=True)
+            else: st.warning("財報數據不全，無法繪製河流圖。")
         elif "3." in mode:
             if not share_hold.empty:
                 big = share_hold[share_hold['Holding_class'] == '1000張以上']
@@ -185,7 +197,7 @@ def main():
                 fig_c.add_trace(go.Scatter(x=big['date'], y=big['percent'], name="1000張大戶(%)"), secondary_y=False)
                 fig_c.add_trace(go.Scatter(x=df['date'], y=df['Close'], name="股價", line=dict(dash='dot')), secondary_y=True)
                 st.plotly_chart(fig_c, use_container_width=True)
-            else: st.warning("無法載入籌碼數據，請檢查 Token 或稍後再試。")
+            else: st.warning("無法載入籌碼數據。")
     else: st.error("查無資料。")
 
 if __name__ == "__main__": main()
