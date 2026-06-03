@@ -6,3 +6,4 @@ requests
 kaleido
 FinMind
 tqdm
+google-generativeai
