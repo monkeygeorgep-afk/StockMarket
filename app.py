@@ -172,8 +172,8 @@ def main():
                     except Exception as e:
                         st.error(f"AI 服務目前無法連線，請檢查 API Key 或模型設定。")
                         st.info(f"詳細錯誤：{e}")
-               else:
-                   st.warning("請先在 Secrets 中設定 GEMINI_API_KEY")
+                else:
+                    st.warning("請先在 Secrets 中設定 GEMINI_API_KEY")
 
         # 3. 三大法人看板 (張)
         st.subheader("🏦 三大法人今日買賣 (張)")
