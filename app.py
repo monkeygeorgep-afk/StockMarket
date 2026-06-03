@@ -159,21 +159,21 @@ def main():
 
         # 2. AI 語義分析
         with st.expander("🤖 AI 多空觀點摘要 (Gemini)", expanded=True):
-    if st.button("生成 AI 分析報告"):
-        if "GEMINI_API_KEY" in st.secrets:
-            try:
+            if st.button("生成 AI 分析報告"):
+                if "GEMINI_API_KEY" in st.secrets:
+                    try:
                 # 建議使用 gemini-2.0-flash，性能與免費額度平衡最好
-                model = genai.GenerativeModel('gemini-2.0-flash')
-                titles = "\n".join(news['title'].tail(8).tolist())
-                prompt = f"請分析以下新聞對{s_name}的多空影響，並給予投資建議：\n{titles}"
+                        model = genai.GenerativeModel('gemini-2.0-flash')
+                        titles = "\n".join(news['title'].tail(8).tolist())
+                        prompt = f"請分析以下新聞對{s_name}的多空影響，並給予投資建議：\n{titles}"
                 
-                response = model.generate_content(prompt)
-                st.write(response.text)
-            except Exception as e:
-                st.error(f"AI 服務目前無法連線，請檢查 API Key 或模型設定。")
-                st.info(f"詳細錯誤：{e}")
-        else:
-            st.warning("請先在 Secrets 中設定 GEMINI_API_KEY")
+                        response = model.generate_content(prompt)
+                        st.write(response.text)
+                    except Exception as e:
+                        st.error(f"AI 服務目前無法連線，請檢查 API Key 或模型設定。")
+                        st.info(f"詳細錯誤：{e}")
+               else:
+                   st.warning("請先在 Secrets 中設定 GEMINI_API_KEY")
 
         # 3. 三大法人看板 (張)
         st.subheader("🏦 三大法人今日買賣 (張)")
