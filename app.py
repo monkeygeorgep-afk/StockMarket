@@ -97,7 +97,7 @@ def fetch_master_data(stock_id):
 
     fin = dl.taiwan_stock_financial_statement(stock_id=stock_id, start_date=(pd.Timestamp.now() - pd.Timedelta(days=730)).strftime('%Y-%m-%d'))
     news = dl.taiwan_stock_news(stock_id=stock_id, start_date=(pd.Timestamp.now() - pd.Timedelta(days=7)).strftime('%Y-%m-%d'))
-    share_hold = dl.taiwan_stock_shareholding_class(stock_id=stock_id, start_date=(pd.Timestamp.now() - pd.Timedelta(days=365)).strftime('%Y-%m-%d'))
+    share_hold = dl.taiwan_stock_holding_shares_per(stock_id=stock_id, start_date=(pd.Timestamp.now() - pd.Timedelta(days=365)).strftime('%Y-%m-%d'))
     
     # 計算 TTM EPS (滾動四季)
     eps_df = fin[fin['type'] == 'EPS'].sort_values('date')
