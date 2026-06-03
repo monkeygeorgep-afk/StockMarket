@@ -68,11 +68,8 @@ def estimate_volume(current_volume):
 # --- 3. 數據綜合獲取 (含 Fail-Safe 機制) ---
 @st.cache_data(ttl=3600)
 def fetch_master_data(stock_id):
-# 方式 A：直接在初始化時傳入
-    if "FINMIND_TOKEN" in st.secrets:
-        dl = DataLoader(token=st.secrets["FINMIND_TOKEN"])
-    else:
-        dl = DataLoader()        
+    dl = DataLoader()
+        
     start_date = (pd.Timestamp.now() - pd.Timedelta(days=730)).strftime('%Y-%m-%d')
     df = dl.taiwan_stock_daily(stock_id=stock_id, start_date=start_date)
     if df.empty: return [None]*8
