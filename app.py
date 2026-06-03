@@ -68,15 +68,20 @@ def estimate_volume(current_volume):
 # --- 3. 數據綜合獲取 (含 Fail-Safe 機制) ---
 @st.cache_data(ttl=3600)
 def fetch_master_data(stock_id):
-    dl = DataLoader()
-    # 如果你有設定 Token，解鎖進階資料功能
-    if "FINMIND_TOKEN" in st.secrets:
-        dl.login(token=st.secrets["FINMIND_TOKEN"])
+    # 修正後的初始化邏輯
+    token = st.secrets.get("FINMIND_TOKEN", None)
+    if token:
+        dl = DataLoader(token=token)
+    else:
+        dl = DataLoader()
         
     start_date = (pd.Timestamp.now() - pd.Timedelta(days=730)).strftime('%Y-%m-%d')
+    
+    # 抓取股價資料
     df = dl.taiwan_stock_daily(stock_id=stock_id, start_date=start_date)
     if df.empty: return [None]*8
     
+    # ... 其餘邏輯保持不變 ...    
     df = df.rename(columns={'max':'High','min':'Low','close':'Close','open':'Open','Trading_Volume':'Volume'})
     df['date'] = pd.to_datetime(df['date'])
     df, sup, res = calculate_indicators(df)
