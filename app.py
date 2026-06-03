@@ -161,7 +161,7 @@ def main():
         with st.expander("🤖 AI 多空觀點摘要 (Gemini)", expanded=True):
             if st.button("生成 AI 分析報告"):
                 if "GEMINI_API_KEY" in st.secrets:
-                    model = genai.GenerativeModel('gemini-pro')
+                    model = genai.GenerativeModel('gemini-2.0-flash')
                     titles = "\n".join(news['title'].tail(5).tolist())
                     response = model.generate_content(f"請分析以下新聞對{s_name}的多空影響：\n{titles}")
                     st.write(response.text)
