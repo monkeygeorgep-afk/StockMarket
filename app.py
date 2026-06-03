@@ -163,7 +163,7 @@ def main():
                 if "GEMINI_API_KEY" in st.secrets:
                     try:
                 # 建議使用 gemini-1.5-flash，性能與免費額度平衡最好
-                        model = genai.GenerativeModel('gemini-2.5-flash-Lite')
+                        model = genai.GenerativeModel('gemini-2.5-flash')
                         titles = "\n".join(news['title'].tail(8).tolist())
                         prompt = f"請分析以下新聞對{s_name}的多空影響，並給予投資建議：\n{titles}"
                 
