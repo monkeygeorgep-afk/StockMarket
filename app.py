@@ -5,40 +5,35 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from FinMind.data import DataLoader
 import requests
-import io
+import google.generativeai as genai
 
-# --- 1. 系統配置 ---
+# --- 1. 系統與 AI 配置 ---
 ST_CONFIG = {
-    "page_title": "台股 AI 全自動戰情室 2.2",
-    "watchlist": ['2330', '2317', '2454', '2308', '2603', '2382'] # 預設監控清單
+    "page_title": "台股 AI 終極戰情室 3.0",
 }
 
-# --- 2. 技術指標運算 (含 KD, MA, RSI, MACD) ---
+# 若有 Gemini API Key，請在 Secrets 設定 GEMINI_API_KEY
+if "GEMINI_API_KEY" in st.secrets:
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+
+# --- 2. 核心運算：技術分析與支撐壓力 ---
 def calculate_indicators(df):
-    # 移動平均線
+    # MA & Bollinger Bands
     df['20MA'] = df['Close'].rolling(window=20).mean()
-    df['60MA'] = df['Close'].rolling(window=60).mean()
+    std = df['Close'].rolling(window=20).std()
+    df['BBU'] = df['20MA'] + (std * 2)
+    df['BBL'] = df['20MA'] - (std * 2)
     
-    # KD 指標 (9, 3, 3)
+    # KD (9, 3, 3)
     low_min = df['Low'].rolling(window=9).min()
     high_max = df['High'].rolling(window=9).max()
     rsv = 100 * (df['Close'] - low_min) / (high_max - low_min)
-    
     k, d = [50.0], [50.0]
     for i in range(1, len(rsv)):
-        # 若當前 RSV 為 NaN (初期資料不足), 則維持前值
-        current_rsv = rsv.iloc[i] if not np.isnan(rsv.iloc[i]) else 50.0
-        new_k = (k[-1] * 2/3) + (current_rsv * 1/3)
+        new_k = (k[-1] * 2/3) + (rsv.iloc[i] * 1/3) if not np.isnan(rsv.iloc[i]) else k[-1]
         new_d = (d[-1] * 2/3) + (new_k * 1/3)
-        k.append(new_k)
-        d.append(new_d)
+        k.append(new_k); d.append(new_d)
     df['K'], df['D'] = k, d
-    
-    # RSI (14)
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    df['RSI'] = 100 - (100 / (1 + (gain / loss)))
     
     # MACD
     exp1 = df['Close'].ewm(span=12, adjust=False).mean()
@@ -46,167 +41,148 @@ def calculate_indicators(df):
     df['MACD'] = exp1 - exp2
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['Hist'] = df['MACD'] - df['Signal']
-    return df
+    
+    # RSI (14)
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    df['RSI'] = 100 - (100 / (1 + (gain / loss)))
+    
+    # 支撐與壓力演算法 (取近期 60 日)
+    support = df['Low'].tail(60).min()
+    resistance = df['High'].tail(60).max()
+    return df, support, resistance
 
-# --- 3. 籌碼數據獲取與統計 ---
-def fetch_chip_data(stock_id):
-    dl = DataLoader()
-    start_date = (pd.Timestamp.now() - pd.Timedelta(days=20)).strftime('%Y-%m-%d')
-    try:
-        chip_df = dl.taiwan_stock_institutional_investors(stock_id=stock_id, start_date=start_date)
-        if chip_df.empty: return pd.DataFrame()
-        # 轉換為張數 (FinMind 回傳通常是張數或股數，這裡假設為張數)
-        return chip_df
-    except:
-        return pd.DataFrame()
-
-def analyze_chip_flow(chip_df):
-    if chip_df.empty: return None
-    latest_days = sorted(chip_df['date'].unique(), reverse=True)[:5]
-    summary = []
-    for count in [1, 3, 5]:
-        target_days = latest_days[:count]
-        temp = chip_df[chip_df['date'].isin(target_days)]
-        # 計算買賣差額
-        diff = temp.groupby('name')['buy'].sum() - temp.groupby('name')['sell'].sum()
-        summary.append({
-            "期間": f"近 {count} 日",
-            "外資": int(diff.get('Foreign_Investor', 0)),
-            "投信": int(diff.get('Investment_Trust', 0)),
-            "自營商": int(diff.get('Dealer', 0))
-        })
-    return pd.DataFrame(summary)
-
-# --- 4. 數據整合與緩存 ---
+# --- 3. 數據獲取 (股價、法人、新聞、財報) ---
 @st.cache_data(ttl=3600)
-def get_full_stock_info(stock_id):
+def fetch_all_data(stock_id):
     dl = DataLoader()
-    start_date = (pd.Timestamp.now() - pd.Timedelta(days=200)).strftime('%Y-%m-%d')
-    # 抓取日股價
+    start_date = (pd.Timestamp.now() - pd.Timedelta(days=365)).strftime('%Y-%m-%d')
+    
+    # 1. 股價與名稱
     df = dl.taiwan_stock_daily(stock_id=stock_id, start_date=start_date)
-    if df.empty: return None, None
+    info = dl.taiwan_stock_info()
+    stock_name = info[info['stock_id'] == stock_id]['stock_name'].values[0] if not info[info['stock_id'] == stock_id].empty else "未知"
+    
+    if df.empty: return None, None, None, None, None
     df = df.rename(columns={'max':'High','min':'Low','close':'Close','open':'Open','Trading_Volume':'Volume'})
     df['date'] = pd.to_datetime(df['date'])
-    df = calculate_indicators(df)
-    # 抓取法人
-    chip = fetch_chip_data(stock_id)
-    return df, chip
+    df, sup, res = calculate_indicators(df)
 
-# --- 5. 綜合策略掃描演算法 ---
-def scan_advanced_signals(df, chip_df):
-    sigs = []
-    if df is None or len(df) < 5: return sigs
-    curr, prev = df.iloc[-1], df.iloc[-2]
+    # 2. 法人 (換算為張數)
+    chip = dl.taiwan_stock_institutional_investors(stock_id=stock_id, start_date=(pd.Timestamp.now() - pd.Timedelta(days=10)).strftime('%Y-%m-%d'))
+    if not chip.empty:
+        chip[['buy', 'sell']] = chip[['buy', 'sell']] / 1000 # 股轉張
+
+    # 3. 新聞
+    news = dl.taiwan_stock_news(stock_id=stock_id, start_date=(pd.Timestamp.now() - pd.Timedelta(days=3)).strftime('%Y-%m-%d'))
     
-    # 技術面: KD 黃金交叉
-    if prev['K'] < prev['D'] and curr['K'] > curr['D'] and curr['K'] < 30:
-        sigs.append("⚡ KD 低檔黃金交叉")
+    # 4. 基本面 (損益表)
+    financial = dl.taiwan_stock_financial_statement(stock_id=stock_id, start_date=(pd.Timestamp.now() - pd.Timedelta(days=365)).strftime('%Y-%m-%d'))
     
-    # 技術面: 爆量突破
-    avg_vol = df['Volume'].iloc[-6:-1].mean()
-    if curr['Volume'] > avg_vol * 2 and curr['Close'] > prev['High']:
-        sigs.append("🚀 帶量突破前高")
+    return df, chip, news, financial, stock_name, sup, res
 
-    # 籌碼面: 法人同步大買
-    if chip_df is not None and not chip_df.empty:
-        today = sorted(chip_df['date'].unique())[-1]
-        t_chip = chip_df[chip_df['date'] == today]
-        fi = t_chip[t_chip['name']=='Foreign_Investor']['buy'].sum() - t_chip[t_chip['name']=='Foreign_Investor']['sell'].sum()
-        it = t_chip[t_chip['name']=='Investment_Trust']['buy'].sum() - t_chip[t_chip['name']=='Investment_Trust']['sell'].sum()
-        if fi > 500 and it > 500:
-            sigs.append("🏦 法人雙買 (外資投信同步大買)")
-            
-    return sigs
-
-# --- 6. Line 推送 (Messaging API) ---
-def send_line_alert(msg):
+# --- 4. AI 語義分析 ---
+def get_ai_insight(news_df):
+    if news_df.empty or "GEMINI_API_KEY" not in st.secrets:
+        return "⚠️ 未偵測到新聞或 AI API Key 未設定。"
+    
+    titles = "\n".join(news_df['title'].tail(5).tolist())
+    model = genai.GenerativeModel('gemini-pro')
+    prompt = f"你是專業台股分析師，請根據以下新聞摘要該個股的『多空觀點』與『潛在風險』，用簡短清單呈現：\n{titles}"
+    
     try:
-        token = st.secrets["LINE_CHANNEL_ACCESS_TOKEN"]
-        uid = st.secrets["LINE_USER_ID"]
-        url = "https://api.line.me/v2/bot/message/push"
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        payload = {"to": uid, "messages": [{"type": "text", "text": msg}]}
-        res = requests.post(url, headers=headers, json=payload)
-        return res.status_code
+        response = model.generate_content(prompt)
+        return response.text
     except:
-        return 500
+        return "AI 分析暫時無法使用。"
 
-# --- 7. Streamlit UI 介面 ---
+# --- 5. UI 介面 ---
 def main():
     st.set_page_config(layout="wide", page_title=ST_CONFIG["page_title"])
-    
-    # 側邊欄：自選監控
+
+    # 初始化自選股
+    if 'watchlist' not in st.session_state:
+        st.session_state.watchlist = ['2330', '2317', '2454']
+
+    # --- 側邊欄 ---
     with st.sidebar:
-        st.title("🛡️ 監控控制台")
-        target_stock = st.text_input("查看股票代碼", value="2330")
+        st.title("🛡️ 戰情控制台")
+        target_stock = st.text_input("輸入股票代號", value="2330")
         
+        st.subheader("🛠️ 技術指標顯示")
+        show_kd = st.checkbox("顯示 KD", value=True)
+        show_macd = st.checkbox("顯示 MACD", value=False)
+        show_rsi = st.checkbox("顯示 RSI", value=False)
+
         st.divider()
-        st.subheader("📡 全自動巡邏")
-        if st.button("執行全清單掃描"):
-            with st.spinner("掃描中..."):
-                reports = []
-                for s in ST_CONFIG["watchlist"]:
-                    d, c = get_full_stock_info(s)
-                    s_sigs = scan_advanced_signals(d, c)
-                    if s_sigs:
-                        reports.append(f"【{s}】\n" + "\n".join(s_sigs))
-                
-                if reports:
-                    final_msg = "🚨 盤後強勢股掃描報告：\n\n" + "\n\n".join(reports)
-                    send_line_alert(final_msg)
-                    st.success("已發送 Line 通知！")
-                else:
-                    st.info("目前清單中無特殊訊號。")
+        st.subheader("📋 自選股管理")
+        new_s = st.text_input("新增代碼")
+        if st.button("加入"):
+            st.session_state.watchlist.append(new_s)
+            st.rerun()
+        st.write("目前追蹤:", st.session_state.watchlist)
 
-    # 主畫面展示
-    df, chip = get_full_stock_info(target_stock)
-    
+    # --- 主畫面數據讀取 ---
+    df, chip, news, financial, s_name, sup, res = fetch_all_data(target_stock)
+
     if df is not None:
-        st.title(f"台股智慧分析：{target_stock}")
+        st.title(f"📈 {target_stock} {s_name}")
         
-        # 1. 籌碼看板
-        st.subheader("🏦 三大法人買賣超動態 (張)")
-        chip_summary = analyze_chip_flow(chip)
-        if chip_summary is not None:
-            c1, c2, c3 = st.columns(3)
-            with c1: st.metric("今日外資", f"{chip_summary.iloc[0]['外資']:,}")
-            with c2: st.metric("今日投信", f"{chip_summary.iloc[0]['投信']:,}")
-            with c3: st.metric("今日自營商", f"{chip_summary.iloc[0]['自營商']:,}")
-            st.table(chip_summary.set_index("期間"))
+        # 支撐壓力呈現
+        c1, c2, c3 = st.columns(3)
+        c1.metric("當前股價", f"{df['Close'].iloc[-1]}", f"{df['Close'].iloc[-1]-df['Close'].iloc[-2]:.1f}")
+        c2.info(f"🧱 壓力價位：{res:.2f}")
+        c3.success(f"⚓ 支撐價位：{sup:.2f}")
 
-        # 2. 技術指標圖表
-        fig = make_subplots(
-            rows=3, cols=1, shared_xaxes=True, 
-            vertical_spacing=0.03, row_heights=[0.5, 0.25, 0.25],
-            subplot_titles=("K線與分價量表", "KD 強弱指標", "MACD 指標")
-        )
+        # --- A. AI 新聞輿情 ---
+        with st.expander("🤖 AI 語義分析報告 (Gemini)", expanded=True):
+            if st.button("生成 AI 多空分析"):
+                st.write(get_ai_insight(news))
+            else:
+                st.write("點擊按鈕分析近期 3 日新聞...")
 
-        # K線與分價量
+        # --- B. 法人動態 (張數) ---
+        st.subheader("🏦 三大法人買賣超統計 (張)")
+        if not chip.empty:
+            latest_date = chip['date'].max()
+            today_chip = chip[chip['date'] == latest_date]
+            stats = today_chip.groupby('name').apply(lambda x: x['buy'].sum() - x['sell'].sum())
+            cols = st.columns(3)
+            cols[0].metric("外資", f"{int(stats.get('Foreign_Investor', 0))}")
+            cols[1].metric("投信", f"{int(stats.get('Investment_Trust', 0))}")
+            cols[2].metric("自營商", f"{int(stats.get('Dealer', 0))}")
+
+        # --- C. 綜合圖表 ---
+        rows = 1 + show_kd + show_macd + show_rsi
+        row_heights = [0.5] + [0.15] * (rows - 1)
+        fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=row_heights)
+
+        # 主圖 (K線 + 支撐壓力線)
         fig.add_trace(go.Candlestick(x=df['date'], open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="K線"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df['date'], y=df['20MA'], name="20MA", line=dict(color='orange')), row=1, col=1)
-        
-        # 簡易分價量表
-        p_bins = np.linspace(df['Low'].min(), df['High'].max(), 15)
-        v_dist, _ = np.histogram(df['Close'], bins=p_bins, weights=df['Volume'])
-        for i in range(len(v_dist)):
-            fig.add_shape(type="rect", xref="paper", yref="y", x0=0.9, x1=0.9+(v_dist[i]/v_dist.max()*0.1),
-                          y0=p_bins[i], y1=p_bins[i+1], fillcolor="rgba(200,200,200,0.15)", line_width=0, row=1, col=1)
+        fig.add_hline(y=res, line_dash="dash", line_color="red", annotation_text="壓力", row=1, col=1)
+        fig.add_hline(y=sup, line_dash="dash", line_color="green", annotation_text="支撐", row=1, col=1)
 
-        # KD (Row 2)
-        fig.add_trace(go.Scatter(x=df['date'], y=df['K'], name="K值", line=dict(color='yellow')), row=2, col=1)
-        fig.add_trace(go.Scatter(x=df['date'], y=df['D'], name="D值", line=dict(color='cyan')), row=2, col=1)
-        fig.add_hline(y=80, line_dash="dash", line_color="red", row=2, col=1)
-        fig.add_hline(y=20, line_dash="dash", line_color="green", row=2, col=1)
+        curr_row = 2
+        if show_kd:
+            fig.add_trace(go.Scatter(x=df['date'], y=df['K'], name="K", line=dict(color='yellow')), row=curr_row, col=1)
+            fig.add_trace(go.Scatter(x=df['date'], y=df['D'], name="D", line=dict(color='cyan')), row=curr_row, col=1)
+            curr_row += 1
+        if show_macd:
+            fig.add_trace(go.Bar(x=df['date'], y=df['Hist'], name="MACD"), row=curr_row, col=1)
+            curr_row += 1
+        if show_rsi:
+            fig.add_trace(go.Scatter(x=df['date'], y=df['RSI'], name="RSI"), row=curr_row, col=1)
 
-        # MACD (Row 3)
-        colors = ['red' if val >= 0 else 'green' for val in df['Hist']]
-        fig.add_trace(go.Bar(x=df['date'], y=df['Hist'], name="MACD", marker_color=colors), row=3, col=1)
-
-        fig.update_layout(height=900, template="plotly_dark", xaxis_rangeslider_visible=False)
+        fig.update_layout(height=400 + 150*rows, template="plotly_dark", xaxis_rangeslider_visible=False)
         st.plotly_chart(fig, use_container_width=True)
 
+        # --- D. 基本面 ---
+        with st.expander("📊 基本面財報數據"):
+            st.dataframe(financial.tail(10))
+
     else:
-        st.error("查無資料，請確認股票代碼是否正確。")
+        st.error("查無資料，請確認代號是否正確。")
 
 if __name__ == "__main__":
     main()
