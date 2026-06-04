@@ -41,25 +41,34 @@ def main():
             if fig_river: st.plotly_chart(fig_river, use_container_width=True)
             
         with tab3:
+            # 1. 執行運算
             bt = qe.run_backtest(df, stop_loss_pct=sl_val)
             geo_brokers = qe.detect_geographic_brokers(broker)
             
-            # 分點地圖繪製
+            # 2. 顯示分點地圖
             fig_broker = vz.plot_broker_landscape(broker)
-            if fig_broker: st.plotly_chart(fig_broker, use_container_width=True)
+            if fig_broker: 
+                st.plotly_chart(fig_broker, use_container_width=True)
             
-            if st.button("🔍 生成 AI 籌碼深度報告"):
-                if "GEMINI_API_KEY" in st.secrets:
-                    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-                    model = genai.GenerativeModel('models/gemini-2.5-flash')
-                    prompt = f"""
-                    你是台股分析師。分析 {data['name']}({target_sid})：
-                    - 地緣分點跡象：{geo_brokers}
-                    - 5日回測勝率：{bt['win_rate']:.1f}%，平均報酬：{bt['avg_return']:.2f}%
-                    - 停損設定：{sl_val}%，歷史觸發停損次數：{bt['sl_triggered']}
-                    請給予結合籌碼集中度與地緣性的操作建議。
-                    """
-                    st.write(model.generate_content(prompt).text)
+            # 3. 顯示回測數據與 AI 報告 (加入 if bt: 判斷)
+            if bt:
+                st.metric("歷史回測勝率", f"{bt['win_rate']:.1f}%")
+                
+                if st.button("🔍 生成 AI 籌碼深度報告"):
+                    if "GEMINI_API_KEY" in st.secrets:
+                        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+                        model = genai.GenerativeModel('models/gemini-1.5-flash-latest')
+                        
+                        prompt = f"""
+                        你是台股分析師。分析 {data['name']}({target_sid})：
+                        - 地緣分點跡象：{geo_brokers}
+                        - 5日回測勝率：{bt['win_rate']:.1f}%，平均報酬：{bt['avg_return']:.2f}%
+                        - 停損設定：{sl_val}%，歷史觸發停損次數：{bt['sl_triggered']}
+                        請給予結合籌碼集中度與地緣性的操作建議。
+                        """
+                        st.write(model.generate_content(prompt).text)
+            else:
+                st.warning("⚠️ 此股票在設定條件下無歷史交易訊號，無法進行回測與 AI 診斷。")
     else: st.error("查無資料，請檢查代號或 API 狀態。")
 
 if __name__ == "__main__": main()
