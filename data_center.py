@@ -40,7 +40,32 @@ class StockDataCenter:
 
     def fetch_chip_data(self, stock_id):
         """抓取法人、分點與新聞"""
-        chip = self.dl.taiwan_stock_institutional_investors(stock_id=stock_id, start_date=(datetime.now() - timedelta(days=20)).strftime('%Y-%m-%d'))
-        broker = self.dl.taiwan_stock_daily_collect(stock_id=stock_id, start_date=(datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d'))
-        news = self.dl.taiwan_stock_news(stock_id=stock_id, start_date=(datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d'))
+        # 1. 抓取三大法人資料
+        chip = self.dl.taiwan_stock_institutional_investors(
+            stock_id=stock_id, 
+            start_date=(datetime.now() - timedelta(days=20)).strftime('%Y-%m-%d')
+        )
+        
+        # 2. 抓取分點資料 (加入錯誤防護)
+        broker = pd.DataFrame()
+        try:
+            # 嘗試使用正確的 API 名稱
+            # 註：部分版本可能更名為 taiwan_stock_daily_collect 或需透過其他方式呼叫
+            if hasattr(self.dl, 'taiwan_stock_daily_collect'):
+                broker = self.dl.taiwan_stock_daily_collect(
+                    stock_id=stock_id, 
+                    start_date=(datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
+                )
+            else:
+                # 如果找不到方法，回傳空表避免當機
+                st.warning(f"目前 FinMind 版本不支援分點資料抓取，請檢查套件版本。")
+        except Exception as e:
+            st.error(f"分點資料抓取失敗: {e}")
+
+        # 3. 抓取新聞
+        news = self.dl.taiwan_stock_news(
+            stock_id=stock_id, 
+            start_date=(datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+        )
+        
         return chip, broker, news
